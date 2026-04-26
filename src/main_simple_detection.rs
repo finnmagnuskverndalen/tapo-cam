@@ -105,7 +105,7 @@ async fn main() -> Result<()> {
 
         // Draw detected faces
         let mut display_frame = frame.clone();
-        for face in faces {
+        for face in &faces {
             let color = core::Scalar::new(0.0, 255.0, 0.0, 0.0); // Green for faces
             let rect = core::Rect::new(face.x, face.y, face.width, face.height);
             imgproc::rectangle(&mut display_frame, rect, color, 2, imgproc::LINE_8, 0)?;
