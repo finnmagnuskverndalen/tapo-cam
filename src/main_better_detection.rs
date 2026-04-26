@@ -3,7 +3,7 @@ mod camera;
 use anyhow::Result;
 use camera::TapoCamera;
 use opencv::{
-    core, highgui, imgproc, prelude::*, videoio,
+    core, highgui, imgproc, dnn, prelude::*, videoio,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
