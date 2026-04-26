@@ -1,5 +1,4 @@
 use anyhow::{bail, Result};
-use md5::Md5;
 use reqwest::Client;
 use serde_json::{json, Value};
 use sha2::Sha256;
@@ -28,7 +27,7 @@ impl TapoCamera {
         // Try three known variants; cameras differ by firmware version
         let candidates: &[(&str, bool)] = &[
             (&format!("{:x}", Sha256::digest(password.as_bytes())), true),  // newer firmware
-            (&format!("{:x}", Md5::digest(password.as_bytes())),    true),  // older firmware
+            (&format!("{:x}", md5::compute(password.as_bytes())),    true),  // older firmware
             (password,                                               false), // no hashing
         ];
 
