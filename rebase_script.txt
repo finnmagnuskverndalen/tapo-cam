@@ -1,4 +1,0 @@
-pick e4d2364 Try SHA256, MD5, and plain password to probe which auth the camera accepts
-drop 8b6c8c1 Fix authentication and RTSP URL
-drop 601d984 Improve application with graceful authentication failure handling
-pick 1a9e06e Remove hardcoded credentials from source code
