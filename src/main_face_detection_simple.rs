@@ -26,12 +26,12 @@ struct FaceDetector {
 impl FaceDetector {
     fn new() -> Result<Self> {
         // Load face cascade
-        let face_cascade = objdetect::CascadeClassifier::new(
+        let mut face_cascade = objdetect::CascadeClassifier::new(
             "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml",
         )?;
         
         // Load eye cascade
-        let eye_cascade = objdetect::CascadeClassifier::new(
+        let mut eye_cascade = objdetect::CascadeClassifier::new(
             "/usr/share/opencv4/haarcascades/haarcascade_eye.xml",
         )?;
         
@@ -205,9 +205,7 @@ async fn main() -> Result<()> {
             // Try to detect eyes within the face ROI
             if face.width > 50 && face.height > 50 { // Only for larger faces
                 let face_roi = Mat::roi(&frame, *face)?;
-                // Convert BoxedRef to &Mat by dereferencing
-                let face_roi_ref: &Mat = &*face_roi;
-                match detector.detect_eyes(face_roi_ref) {
+                match detector.detect_eyes(&face_roi) {
                     Ok(eyes) => {
                         for eye in eyes {
                             // Adjust eye coordinates relative to the whole frame
