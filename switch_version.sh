@@ -50,24 +50,39 @@ case "$VERSION" in
             echo "❌ Full detection version not found"
         fi
         ;;
+    "improved-tracking")
+        echo "Switching to improved tracking version (RECOMMENDED)..."
+        if [ -f "src/main_improved_detection.rs" ]; then
+            # Backup current main.rs
+            if [ -f "src/main.rs" ]; then
+                cp src/main.rs src/main_backup.rs
+            fi
+            cp src/main_improved_detection.rs src/main.rs
+            echo "✅ Switched to improved tracking version"
+        else
+            echo "❌ Improved tracking version not found"
+        fi
+        ;;
     "list")
         echo "Available versions:"
         echo "  original          - Basic camera control without object detection"
-        echo "  simple-detection  - Face detection only (recommended)"
+        echo "  simple-detection  - Face detection only"
         echo "  full-detection    - Full object detection (humans, animals, etc.)"
+        echo "  improved-tracking - Improved detection with object tracking (RECOMMENDED)"
         echo ""
         echo "Usage: ./switch_version.sh <version>"
-        echo "Example: ./switch_version.sh simple-detection"
+        echo "Example: ./switch_version.sh improved-tracking"
         ;;
     *)
         echo "Usage: ./switch_version.sh <version>"
         echo ""
         echo "Versions:"
         echo "  original          - Basic camera control"
-        echo "  simple-detection  - Face detection (current)"
+        echo "  simple-detection  - Face detection"
         echo "  full-detection    - Full object detection"
+        echo "  improved-tracking - Improved tracking (current)"
         echo "  list              - List available versions"
         echo ""
-        echo "Current version is configured for: simple-detection"
+        echo "Current version is configured for: improved-tracking"
         ;;
 esac
