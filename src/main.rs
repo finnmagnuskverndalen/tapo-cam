@@ -84,7 +84,7 @@ impl TrackedObject {
 struct ObjectTracker {
     objects: Vec<TrackedObject>,
     next_id: u32,
-    frame_size: core::Size,
+    _frame_size: core::Size, // Keep for potential future use
 }
 
 impl ObjectTracker {
@@ -92,16 +92,15 @@ impl ObjectTracker {
         Self {
             objects: Vec::new(),
             next_id: 1,
-            frame_size: core::Size::new(frame_width, frame_height),
+            _frame_size: core::Size::new(frame_width, frame_height),
         }
     }
 
     fn update(&mut self, new_detections: Vec<core::Rect>, confidences: Vec<f32>) {
         let current_time = Instant::now();
         
-        // Mark all objects as unmatched
+        // Mark all objects as unmatched and age them
         for obj in &mut self.objects {
-            // Age the object
             obj.age = current_time.duration_since(obj.last_seen);
         }
         
@@ -109,14 +108,14 @@ impl ObjectTracker {
         let mut matched = vec![false; new_detections.len()];
         
         for i in 0..new_detections.len() {
-            let detection = &new_detections[i];
+            let detection = new_detections[i];
             let confidence = confidences[i];
             
             let mut best_match_idx = None;
             let mut best_iou = 0.3; // Minimum IoU threshold
             
-            for (j, obj) in self.objects.iter_mut().enumerate() {
-                let iou = self.calculate_iou(detection, &obj.bbox);
+            for j in 0..self.objects.len() {
+                let iou = self.calculate_iou(&detection, &self.objects[j].bbox);
                 if iou > best_iou {
                     best_iou = iou;
                     best_match_idx = Some(j);
@@ -124,7 +123,7 @@ impl ObjectTracker {
             }
             
             if let Some(idx) = best_match_idx {
-                self.objects[idx].update(*detection, confidence);
+                self.objects[idx].update(detection, confidence);
                 matched[i] = true;
             }
         }
@@ -293,13 +292,13 @@ async fn main() -> Result<()> {
                 ).ok();
                 
                 // Combine detections with confidence scores
-                for face in &frontal_faces {
-                    all_detections.push(*face);
+                for face in frontal_faces.iter() {
+                    all_detections.push(face.clone());
                     all_confidences.push(0.8); // Higher confidence for frontal faces
                 }
                 
-                for face in &profile_faces {
-                    all_detections.push(*face);
+                for face in profile_faces.iter() {
+                    all_detections.push(face.clone());
                     all_confidences.push(0.6); // Lower confidence for profile faces
                 }
                 
@@ -321,7 +320,7 @@ async fn main() -> Result<()> {
         // Draw tracked objects with history
         let mut display_frame = frame.clone();
         
-        for obj in tracked_objects {
+        for obj in &tracked_objects {
             // Determine color based on stability
             let color = if obj.stable {
                 core::Scalar::new(0.0, 255.0, 0.0, 0.0) // Green for stable
@@ -360,7 +359,7 @@ async fn main() -> Result<()> {
                     // Draw trail with fading color
                     let trail_color = core::Scalar::new(
                         0.0,
-                        255.0 * (i as f32 / obj.history.len() as f32),
+                        (255.0 * (i as f32 / obj.history.len() as f32)) as f64,
                         0.0,
                         0.0,
                     );
@@ -459,7 +458,7 @@ async fn main() -> Result<()> {
                 113 | 27 => break, // 'q' or ESC
                 104 | 72 if camera.is_some() => { // 'h' or 'H'
                     if let Some(cam) = &camera {
-                        let mut cam_lock = cam.lock().await;
+                        let cam_lock = cam.lock().await;
                         if let Err(e) = cam_lock.calibrate().await {
                             println!("Failed to calibrate: {}", e);
                         } else {
@@ -469,13 +468,13 @@ async fn main() -> Result<()> {
                 }
                 81 | 82 if camera.is_some() => { // Left/Right arrow keys (Linux keycodes)
                     if let Some(cam) = &camera {
-                        let mut cam_lock = cam.lock().await;
+                        let cam_lock = cam.lock().await;
                         let _ = cam_lock.move_motor(-PAN_SPEED, 0).await;
                     }
                 }
                 83 | 84 if camera.is_some() => { // Up/Down arrow keys (Linux keycodes)
                     if let Some(cam) = &camera {
-                        let mut cam_lock = cam.lock().await;
+                        let cam_lock = cam.lock().await;
                         let _ = cam_lock.move_motor(0, TILT_SPEED).await;
                     }
                 }
@@ -537,7 +536,7 @@ fn calculate_iou_simple(a: &core::Rect, b: &core::Rect) -> f32 {
     let intersection_x = (a.x + a.width).min(b.x + b.width) - a.x.max(b.x);
     let intersection_y = (a.y + a.height).min(b.y + b.height) - a.y.max(b.y);
     
-    if intersection_x <= 0.0 || intersection_y <= 0.0 {
+    if intersection_x <= 0 || intersection_y <= 0 {
         return 0.0;
     }
     
