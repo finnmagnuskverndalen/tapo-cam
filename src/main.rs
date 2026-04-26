@@ -62,18 +62,19 @@ impl MotionDetector {
             core::Size::new(5, 5),
             core::Point::new(-1, -1),
         )?;
-        imgproc::dilate(&thresh, &mut thresh, &kernel, core::Point::new(-1, -1), 1, core::BORDER_CONSTANT, core::Scalar::default())?;
+        let mut dilated = Mat::default();
+        imgproc::dilate(&thresh, &mut dilated, &kernel, core::Point::new(-1, -1), 1, core::BORDER_CONSTANT, core::Scalar::default())?;
+        thresh = dilated;
         
         // Find contours
         let mut contours = core::Vector::<core::Vector<core::Point>>::new();
-        let mut hierarchy = Mat::default();
-        imgproc::find_contours(&thresh, &mut contours, &mut hierarchy, imgproc::RETR_EXTERNAL, imgproc::CHAIN_APPROX_SIMPLE, core::Point::new(0, 0))?;
+        imgproc::find_contours(&thresh, &mut contours, imgproc::RETR_EXTERNAL, imgproc::CHAIN_APPROX_SIMPLE, core::Point::new(0, 0))?;
         
         // Filter contours by area and convert to bounding boxes
         let mut motion_regions = Vec::new();
         for contour in contours.iter() {
             let area = imgproc::contour_area(&contour, false)?;
-            if area > self.min_motion_area {
+            if area > self.min_motion_area as f64 {
                 let bbox = imgproc::bounding_rect(&contour)?;
                 motion_regions.push(bbox);
             }
@@ -260,26 +261,15 @@ async fn main() -> Result<()> {
         
         for (i, obj) in objects.iter().enumerate() {
             // Color based on object index (for multiple objects)
-            let hue = (i as f32 * 60.0) % 180.0;
-            let mut color_hsv = Mat::default();
-            let mut color_bgr = Mat::default();
-            
-            core::hconcat(
-                &[
-                    &Mat::from_slice(&[hue as f64])?,
-                    &Mat::from_slice(&[255.0])?,
-                    &Mat::from_slice(&[255.0])?,
-                ]?,
-                &mut color_hsv,
-            )?;
-            
-            imgproc::cvt_color(&color_hsv.reshape(1, 1)?, &mut color_bgr, imgproc::COLOR_HSV2BGR, 0)?;
-            let color_vec = color_bgr.data_typed::<core::VecN<f64, 3>>()?;
-            let color = if !color_vec.is_empty() {
-                core::Scalar::new(color_vec[0][2], color_vec[0][1], color_vec[0][0], 0.0)
-            } else {
-                core::Scalar::new(0.0, 255.0, 0.0, 0.0) // Default to green
-            };
+            let colors = [
+                core::Scalar::new(0.0, 255.0, 0.0, 0.0),   // Green
+                core::Scalar::new(255.0, 0.0, 0.0, 0.0),   // Blue
+                core::Scalar::new(0.0, 0.0, 255.0, 0.0),   // Red
+                core::Scalar::new(0.0, 255.0, 255.0, 0.0), // Yellow
+                core::Scalar::new(255.0, 0.0, 255.0, 0.0), // Magenta
+                core::Scalar::new(255.0, 255.0, 0.0, 0.0), // Cyan
+            ];
+            let color = colors[i % colors.len()];
             
             // Draw bounding box
             imgproc::rectangle(&mut display_frame, *obj, color, 2, imgproc::LINE_8, 0)?;
