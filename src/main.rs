@@ -202,12 +202,15 @@ async fn main() -> Result<()> {
                 false,
             )?;
             
-            // Try to detect eyes within the face ROI
+            // Try to detect eyes within the face region
             if face.width > 50 && face.height > 50 { // Only for larger faces
-                let face_roi = Mat::roi(&frame, *face)?;
-                // Convert BoxedRef to &Mat by dereferencing
-                let face_roi_ref: &Mat = &*face_roi;
-                match detector.detect_eyes(face_roi_ref) {
+                // Create a sub-image for the face region
+                let face_region = Mat::roi(&frame, *face)?;
+                // Convert to a Mat we can use
+                let mut face_mat = Mat::default();
+                face_region.copy_to(&mut face_mat)?;
+                
+                match detector.detect_eyes(&face_mat) {
                     Ok(eyes) => {
                         for eye in eyes {
                             // Adjust eye coordinates relative to the whole frame
