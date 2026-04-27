@@ -309,12 +309,23 @@ async fn main() -> Result<()> {
 
         if Instant::now().duration_since(ptz_debounce) > ptz_debounce_ms {
             if let Some(cam) = &camera {
+                // Spawn fire-and-forget so PTZ network requests don't block the display loop
                 let handled = match key {
-                    104 | 72 => { cam.lock().await.calibrate().await.ok(); println!("Calibrating..."); true }
-                    KEY_LEFT  => { cam.lock().await.move_motor(-PAN_SPEED, 0).await.ok(); true }
-                    KEY_RIGHT => { cam.lock().await.move_motor(PAN_SPEED, 0).await.ok(); true }
-                    KEY_UP    => { cam.lock().await.move_motor(0, TILT_SPEED).await.ok(); true }
-                    KEY_DOWN  => { cam.lock().await.move_motor(0, -TILT_SPEED).await.ok(); true }
+                    104 | 72 => {
+                        let c = Arc::clone(cam);
+                        tokio::spawn(async move {
+                            if let Err(e) = c.lock().await.calibrate().await {
+                                eprintln!("Calibrate error: {e}");
+                            } else {
+                                println!("Calibrating...");
+                            }
+                        });
+                        true
+                    }
+                    KEY_LEFT  => { let c = Arc::clone(cam); tokio::spawn(async move { c.lock().await.move_motor(-PAN_SPEED, 0).await.ok(); }); true }
+                    KEY_RIGHT => { let c = Arc::clone(cam); tokio::spawn(async move { c.lock().await.move_motor( PAN_SPEED, 0).await.ok(); }); true }
+                    KEY_UP    => { let c = Arc::clone(cam); tokio::spawn(async move { c.lock().await.move_motor(0,  TILT_SPEED).await.ok(); }); true }
+                    KEY_DOWN  => { let c = Arc::clone(cam); tokio::spawn(async move { c.lock().await.move_motor(0, -TILT_SPEED).await.ok(); }); true }
                     _ => false,
                 };
                 if handled { ptz_debounce = Instant::now(); }
