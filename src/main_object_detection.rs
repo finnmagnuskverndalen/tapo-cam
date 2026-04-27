@@ -99,103 +99,79 @@ impl ObjectDetector {
     }
 
     fn detect_objects(&mut self, frame: &Mat) -> Result<Vec<DetectedObject>> {
+        // Downscale for faster detection
+        let mut small = Mat::default();
+        imgproc::resize(frame, &mut small, core::Size::default(), 0.5, 0.5, imgproc::INTER_LINEAR)?;
+
         let mut gray = Mat::default();
-        imgproc::cvt_color(frame, &mut gray, imgproc::COLOR_BGR2GRAY, 0)?;
-        imgproc::equalize_hist(&gray, &mut gray)?;
+        imgproc::cvt_color(&small, &mut gray, imgproc::COLOR_BGR2GRAY, 0)?;
+        // equalize_hist requires separate src and dst — using same Mat is undefined behavior
+        let mut gray_eq = Mat::default();
+        imgproc::equalize_hist(&gray, &mut gray_eq)?;
+        let gray = gray_eq;
+
+        // Detected rects are in the downscaled image; scale back to original coordinates
+        let scale_rect = |r: core::Rect| DetectedObject {
+            x: (r.x * 2),
+            y: (r.y * 2),
+            width: (r.width * 2),
+            height: (r.height * 2),
+            object_type: ObjectType::Unknown, // overridden below
+            confidence: 0.0,
+        };
 
         let mut objects = Vec::new();
 
-        // Detect human faces
+        // min_size is in the downscaled image: 15px here = 30px in the original
+        let min_sz = core::Size::new(15, 15);
+
         let mut faces = types::VectorOfRect::new();
         self.face_cascade.detect_multi_scale(
-            &gray,
-            &mut faces,
-            1.1,
-            3,
-            objdetect::CASCADE_SCALE_IMAGE,
-            core::Size::new(30, 30),
-            core::Size::new(0, 0),
+            &gray, &mut faces, 1.1, 3,
+            objdetect::CASCADE_SCALE_IMAGE, min_sz, core::Size::new(0, 0),
         )?;
-
         for face in faces {
-            objects.push(DetectedObject {
-                x: face.x,
-                y: face.y,
-                width: face.width,
-                height: face.height,
-                object_type: ObjectType::Human,
-                confidence: 0.8,
-            });
+            let mut obj = scale_rect(face);
+            obj.object_type = ObjectType::Human;
+            obj.confidence = 0.8;
+            objects.push(obj);
         }
 
-        // Detect full bodies
         let mut full_bodies = types::VectorOfRect::new();
         self.fullbody_cascade.detect_multi_scale(
-            &gray,
-            &mut full_bodies,
-            1.05,
-            3,
-            objdetect::CASCADE_SCALE_IMAGE,
-            core::Size::new(30, 30),
-            core::Size::new(0, 0),
+            &gray, &mut full_bodies, 1.05, 3,
+            objdetect::CASCADE_SCALE_IMAGE, min_sz, core::Size::new(0, 0),
         )?;
-
         for body in full_bodies {
-            objects.push(DetectedObject {
-                x: body.x,
-                y: body.y,
-                width: body.width,
-                height: body.height,
-                object_type: ObjectType::Human,
-                confidence: 0.7,
-            });
+            let mut obj = scale_rect(body);
+            obj.object_type = ObjectType::Human;
+            obj.confidence = 0.7;
+            objects.push(obj);
         }
 
-        // Detect upper bodies
         let mut upper_bodies = types::VectorOfRect::new();
         self.upperbody_cascade.detect_multi_scale(
-            &gray,
-            &mut upper_bodies,
-            1.05,
-            3,
-            objdetect::CASCADE_SCALE_IMAGE,
-            core::Size::new(30, 30),
-            core::Size::new(0, 0),
+            &gray, &mut upper_bodies, 1.05, 3,
+            objdetect::CASCADE_SCALE_IMAGE, min_sz, core::Size::new(0, 0),
         )?;
-
         for body in upper_bodies {
-            objects.push(DetectedObject {
-                x: body.x,
-                y: body.y,
-                width: body.width,
-                height: body.height,
-                object_type: ObjectType::Human,
-                confidence: 0.6,
-            });
+            let mut obj = scale_rect(body);
+            obj.object_type = ObjectType::Human;
+            obj.confidence = 0.6;
+            objects.push(obj);
         }
 
-        // Detect cats/animals if cascade is loaded
         if !self.cat_cascade.empty()? {
             let mut cats = types::VectorOfRect::new();
             self.cat_cascade.detect_multi_scale(
-                &gray,
-                &mut cats,
-                1.05,
-                3,
-                objdetect::CASCADE_SCALE_IMAGE,
-                core::Size::new(30, 30),
-                core::Size::new(0, 0),
+                &gray, &mut cats, 1.05, 3,
+                objdetect::CASCADE_SCALE_IMAGE, min_sz, core::Size::new(0, 0),
             )?;
-
             for cat in cats {
-                objects.push(DetectedObject {
-                    x: cat.x,
-                    y: cat.y,
-                    width: cat.width,
-                    height: cat.height,
-                    object_type: ObjectType::Animal,
-                    confidence: 0.7,
-                });
+                let mut obj = scale_rect(cat);
+                obj.object_type = ObjectType::Animal;
+                obj.confidence = 0.7;
+                objects.push(obj);
             }
         }
 
@@ -308,24 +284,40 @@ async fn main() -> Result<()> {
     let mut detector = ObjectDetector::new()?;
     println!("Object detector initialized successfully");
 
-    // Construct RTSP URL from credentials
+    // Must be set before VideoCapture opens the stream
+    // SAFETY: single-threaded at this point; no other threads read this env var
+    unsafe {
+        std::env::set_var(
+            "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+            "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay",
+        );
+    }
+
     let rtsp_url = format!("rtsp://{}:{}@{}:554/stream1", email, password, CAM_IP);
     println!("Opening RTSP stream: rtsp://{}:****@{}:554/stream1", email, CAM_IP);
-    
+
     let mut cap = videoio::VideoCapture::from_file(&rtsp_url, videoio::CAP_FFMPEG)?;
     if !cap.is_opened()? {
         anyhow::bail!("Failed to open RTSP stream. Check credentials and network connection.");
     }
+    cap.set(videoio::CAP_PROP_BUFFERSIZE, 1.0)?;
 
     highgui::named_window(WINDOW, highgui::WINDOW_AUTOSIZE)?;
 
     let mut frame_count = 0u64;
-    let mut last_key_check = Instant::now();
-    let debounce_delay = Duration::from_millis(250);
     let mut frame = Mat::default();
+    // Persist detections across frames — avoids flicker on non-detection frames
+    let mut last_objects: Vec<DetectedObject> = Vec::new();
+    let mut ptz_debounce = Instant::now() - Duration::from_secs(1);
+    let ptz_debounce_ms = Duration::from_millis(200);
+
+    // Arrow key codes for Linux/X11
+    const KEY_LEFT: i32 = 65361;
+    const KEY_UP: i32 = 65362;
+    const KEY_RIGHT: i32 = 65363;
+    const KEY_DOWN: i32 = 65364;
 
     println!("Starting object detection. Press Q or ESC to quit.");
-    println!("If PTZ is enabled: Arrow keys for pan/tilt, H for calibrate");
 
     loop {
         if !cap.read(&mut frame)? || frame.size()?.width == 0 {
@@ -334,60 +326,47 @@ async fn main() -> Result<()> {
         }
 
         frame_count += 1;
-        
-        // Run object detection every 3rd frame to reduce CPU load
-        let mut objects = Vec::new();
+
+        // Run detection every 3rd frame; carry last_objects on non-detection frames
         if frame_count % 3 == 0 {
-            objects = detector.detect_objects(&frame)?;
+            match detector.detect_objects(&frame) {
+                Ok(objects) => last_objects = objects,
+                Err(e) => eprintln!("Detection error: {}", e),
+            }
         }
 
-        // Draw detected objects
         let mut display_frame = frame.clone();
-        if !objects.is_empty() {
-            draw_objects(&mut display_frame, &objects, frame_count)?;
-        }
+        draw_objects(&mut display_frame, &last_objects, frame_count)?;
 
-        // Show frame
         highgui::imshow(WINDOW, &display_frame)?;
 
-        // Check for keyboard input
-        let key = highgui::wait_key(30)?;
+        // wait_key must be called every frame for GUI events to process
+        let key = highgui::wait_key(1)?;
+        match key {
+            27 | 113 => break, // ESC or 'q'
+            _ => {}
+        }
+
+        // PTZ commands with debounce
         let now = Instant::now();
-        
-        if now.duration_since(last_key_check) > debounce_delay {
-            match key {
-                27 | 113 => break, // ESC or 'q'
-                104 | 72 if camera.is_some() => { // 'h' or 'H'
-                    if let Some(cam) = &camera {
-                        let cam = cam.lock().await;
-                        if let Err(e) = cam.calibrate().await {
-                            eprintln!("Calibration failed: {}", e);
-                        } else {
-                            println!("Camera calibration/return to home initiated");
-                        }
+        if now.duration_since(ptz_debounce) > ptz_debounce_ms {
+            if let Some(cam) = &camera {
+                let handled = match key {
+                    104 | 72 => {
+                        cam.lock().await.calibrate().await.ok();
+                        println!("Calibrating...");
+                        true
                     }
+                    KEY_LEFT => { cam.lock().await.move_motor(-PAN_SPEED, 0).await.ok(); true }
+                    KEY_RIGHT => { cam.lock().await.move_motor(PAN_SPEED, 0).await.ok(); true }
+                    KEY_UP => { cam.lock().await.move_motor(0, TILT_SPEED).await.ok(); true }
+                    KEY_DOWN => { cam.lock().await.move_motor(0, -TILT_SPEED).await.ok(); true }
+                    _ => false,
+                };
+                if handled {
+                    ptz_debounce = Instant::now();
                 }
-                81 | 82 | 83 | 84 if camera.is_some() => { // Arrow keys
-                    if let Some(cam) = &camera {
-                        let cam = cam.lock().await;
-                        let (pan, tilt) = match key {
-                            81 => (-PAN_SPEED, 0),    // Left arrow
-                            82 => (PAN_SPEED, 0),     // Right arrow  
-                            83 => (0, TILT_SPEED),    // Up arrow
-                            84 => (0, -TILT_SPEED),   // Down arrow
-                            _ => (0, 0),
-                        };
-                        
-                        if pan != 0 || tilt != 0 {
-                            if let Err(e) = cam.move_motor(pan, tilt).await {
-                                eprintln!("PTZ move failed: {}", e);
-                            }
-                        }
-                    }
-                }
-                _ => {}
             }
-            last_key_check = now;
         }
     }
 

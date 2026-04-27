@@ -10,81 +10,164 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 const CAM_IP: &str = "192.168.10.185";
-const WINDOW: &str = "Tapo C200 - Face & Eye Detection";
+const WINDOW: &str = "Tapo C200 - Detection";
 const PAN_SPEED: i32 = 40;
 const TILT_SPEED: i32 = 40;
 
-struct FaceDetector {
-    face_cascade: objdetect::CascadeClassifier,
-    eye_cascade: objdetect::CascadeClassifier,
-    scale_factor: f64,
-    min_neighbors: i32,
-    min_size: core::Size,
-    max_size: core::Size,
+const KEY_LEFT: i32 = 65361;
+const KEY_UP: i32 = 65362;
+const KEY_RIGHT: i32 = 65363;
+const KEY_DOWN: i32 = 65364;
+
+// How often to run each detector (in frames)
+const FACE_EVERY_N: u64 = 3;
+const PERSON_EVERY_N: u64 = 6;
+
+// Scale factor for downscaling before detection (faster Haar + HOG)
+const DETECT_SCALE: f64 = 0.5;
+
+#[derive(Clone)]
+struct Detection {
+    rect: core::Rect,
+    label: &'static str,
+    color: core::Scalar,
 }
 
-impl FaceDetector {
+struct Detector {
+    face_frontal: objdetect::CascadeClassifier,
+    face_profile: Option<objdetect::CascadeClassifier>,
+    hog: objdetect::HOGDescriptor,
+}
+
+impl Detector {
     fn new() -> Result<Self> {
-        // Load face cascade
-        let face_cascade = objdetect::CascadeClassifier::new(
-            "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml",
+        let base = "/usr/share/opencv4/haarcascades/";
+
+        let face_frontal = objdetect::CascadeClassifier::new(
+            &format!("{}haarcascade_frontalface_default.xml", base),
         )?;
-        
-        // Load eye cascade
-        let eye_cascade = objdetect::CascadeClassifier::new(
-            "/usr/share/opencv4/haarcascades/haarcascade_eye.xml",
-        )?;
-        
-        Ok(Self {
-            face_cascade,
-            eye_cascade,
-            scale_factor: 1.1,
-            min_neighbors: 3,
-            min_size: core::Size::new(30, 30),
-            max_size: core::Size::new(300, 300),
-        })
+
+        // Profile cascade detects sideways-facing people
+        let face_profile = match objdetect::CascadeClassifier::new(
+            &format!("{}haarcascade_profileface.xml", base),
+        ) {
+            Ok(c) => { println!("Profile face cascade: loaded"); Some(c) }
+            Err(_) => { println!("Profile face cascade: not found (frontal only)"); None }
+        };
+
+        // HOG person detector — built-in, no model files needed, far better than Haar body cascades
+        let mut hog = objdetect::HOGDescriptor::default()?;
+        let people_svm = objdetect::HOGDescriptor::get_default_people_detector()?;
+        hog.set_svm_detector_vec(people_svm);
+        println!("HOG person detector: ready");
+
+        Ok(Self { face_frontal, face_profile, hog })
     }
-    
-    fn detect_faces(&mut self, frame: &Mat) -> Result<Vec<core::Rect>> {
+
+    fn detect_faces(&mut self, frame: &Mat) -> Result<Vec<Detection>> {
+        let mut small = Mat::default();
+        imgproc::resize(frame, &mut small, core::Size::default(),
+            DETECT_SCALE, DETECT_SCALE, imgproc::INTER_LINEAR)?;
+
         let mut gray = Mat::default();
-        imgproc::cvt_color(frame, &mut gray, imgproc::COLOR_BGR2GRAY, 0)?;
-        
-        // Equalize histogram for better contrast
+        imgproc::cvt_color(&small, &mut gray, imgproc::COLOR_BGR2GRAY, 0)?;
         let mut gray_eq = Mat::default();
         imgproc::equalize_hist(&gray, &mut gray_eq)?;
-        
-        // Detect faces
-        let mut faces = core::Vector::new();
-        self.face_cascade.detect_multi_scale(
-            &gray_eq,
-            &mut faces,
-            self.scale_factor,
-            self.min_neighbors,
-            0, // flags
-            self.min_size,
-            self.max_size,
+
+        let min_sz = core::Size::new(15, 15); // 30px in original
+        let inv = 1.0 / DETECT_SCALE;
+        let mut detections = Vec::new();
+
+        // Frontal faces
+        let mut frontal = core::Vector::<core::Rect>::new();
+        self.face_frontal.detect_multi_scale(
+            &gray_eq, &mut frontal,
+            1.1, 4, 0, min_sz, core::Size::new(0, 0),
         )?;
-        
-        Ok(faces.to_vec())
+        for r in frontal.iter() {
+            detections.push(Detection {
+                rect: scale_rect(r, inv),
+                label: "Face",
+                color: core::Scalar::new(0.0, 230.0, 0.0, 0.0), // Green
+            });
+        }
+
+        // Profile faces — skip if heavily overlaps with an already-found frontal face
+        if let Some(profile) = &mut self.face_profile {
+            let mut profiles = core::Vector::<core::Rect>::new();
+            profile.detect_multi_scale(
+                &gray_eq, &mut profiles,
+                1.1, 4, 0, min_sz, core::Size::new(0, 0),
+            )?;
+            for p in profiles.iter() {
+                let scaled = scale_rect(p, inv);
+                if !detections.iter().any(|d| iou(&d.rect, &scaled) > 0.3) {
+                    detections.push(Detection {
+                        rect: scaled,
+                        label: "Face",
+                        color: core::Scalar::new(50.0, 200.0, 0.0, 0.0), // Slightly different green
+                    });
+                }
+            }
+        }
+
+        Ok(detections)
     }
-    
-    fn detect_eyes(&mut self, face_roi: &Mat) -> Result<Vec<core::Rect>> {
-        let mut gray = Mat::default();
-        imgproc::cvt_color(face_roi, &mut gray, imgproc::COLOR_BGR2GRAY, 0)?;
-        
-        let mut eyes = core::Vector::new();
-        self.eye_cascade.detect_multi_scale(
-            &gray,
-            &mut eyes,
-            1.1, // scale factor
-            2,   // min neighbors
-            0,   // flags
-            core::Size::new(20, 20), // min size
-            core::Size::new(100, 100), // max size
+
+    fn detect_persons(&mut self, frame: &Mat) -> Result<Vec<Detection>> {
+        // HOG works on BGR image directly; scale slightly smaller than face detection for speed
+        let hog_scale = 0.4f64;
+        let mut small = Mat::default();
+        imgproc::resize(frame, &mut small, core::Size::default(),
+            hog_scale, hog_scale, imgproc::INTER_LINEAR)?;
+
+        let mut found = core::Vector::<core::Rect>::new();
+        self.hog.detect_multi_scale(
+            &small,
+            &mut found,
+            0.0,                       // hit_threshold: 0 = use trained default
+            core::Size::new(8, 8),     // win_stride: smaller = more accurate but slower
+            core::Size::new(0, 0),     // padding
+            1.05,                      // scale: smaller = more levels = more accurate but slower
+            2.0,                       // group_threshold: higher = fewer false positives
+            false,                     // use_meanshift_grouping
         )?;
-        
-        Ok(eyes.to_vec())
+
+        let inv = 1.0 / hog_scale;
+        Ok(found.iter().map(|r| Detection {
+            rect: scale_rect(r, inv),
+            label: "Person",
+            color: core::Scalar::new(230.0, 180.0, 0.0, 0.0), // Cyan
+        }).collect())
     }
+}
+
+fn scale_rect(r: core::Rect, inv: f64) -> core::Rect {
+    core::Rect::new(
+        (r.x as f64 * inv) as i32,
+        (r.y as f64 * inv) as i32,
+        (r.width as f64 * inv) as i32,
+        (r.height as f64 * inv) as i32,
+    )
+}
+
+fn iou(a: &core::Rect, b: &core::Rect) -> f32 {
+    let ix = (a.x + a.width).min(b.x + b.width) - a.x.max(b.x);
+    let iy = (a.y + a.height).min(b.y + b.height) - a.y.max(b.y);
+    if ix <= 0 || iy <= 0 {
+        return 0.0;
+    }
+    let inter = (ix * iy) as f32;
+    let union = (a.width * a.height + b.width * b.height) as f32 - inter;
+    inter / union
+}
+
+fn put_text_outlined(frame: &mut Mat, text: &str, pos: core::Point, scale: f64, color: core::Scalar) -> opencv::Result<()> {
+    imgproc::put_text(frame, text, pos, imgproc::FONT_HERSHEY_SIMPLEX, scale,
+        core::Scalar::new(0.0, 0.0, 0.0, 0.0), 3, imgproc::LINE_AA, false)?;
+    imgproc::put_text(frame, text, pos, imgproc::FONT_HERSHEY_SIMPLEX, scale,
+        color, 1, imgproc::LINE_AA, false)?;
+    Ok(())
 }
 
 #[tokio::main]
@@ -97,280 +180,166 @@ async fn main() -> Result<()> {
 
     println!("Connecting to Tapo C200 at {CAM_IP}...");
 
-    // Try to connect to camera for PTZ control
     let camera = match TapoCamera::connect(CAM_IP, &email, &password).await {
         Ok(cam) => {
             let info = cam.get_device_info().await?;
             println!("Connected: {}", info["device_info"]["basic_info"]["device_alias"]
-                .as_str()
-                .unwrap_or("C200"));
+                .as_str().unwrap_or("C200"));
             println!("PTZ controls: ENABLED");
             Some(Arc::new(Mutex::new(cam)))
         }
         Err(e) => {
-            println!("Camera authentication failed: {}. PTZ controls will be disabled.", e);
-            println!("Video streaming will continue...");
+            println!("Camera auth failed: {}. PTZ disabled, streaming only.", e);
             None
         }
     };
 
-    // Initialize face detector
-    println!("Initializing face detector...");
-    let mut detector = FaceDetector::new()?;
-    println!("Face detector ready with OpenCV Haar cascades");
+    println!("Initializing detectors...");
+    let mut detector = Detector::new()?;
+    println!("Detectors ready");
 
-    // Construct RTSP URL from credentials
-    let rtsp_url = format!("rtsp://{}:{}@{}:554/stream1", email, password, CAM_IP);
-    println!("Opening RTSP stream: rtsp://{}:****@{}:554/stream1", email, CAM_IP);
-    
-    let mut cap = videoio::VideoCapture::from_file(&rtsp_url, videoio::CAP_FFMPEG)?;
-    if !cap.is_opened()? {
-        anyhow::bail!("Failed to open RTSP stream. Check credentials and network connection.");
+    // Must be set before VideoCapture opens the stream
+    // SAFETY: single-threaded at this point; no other threads read this env var
+    unsafe {
+        std::env::set_var(
+            "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+            "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay",
+        );
     }
 
-    // Get frame info
+    let rtsp_url = format!("rtsp://{}:{}@{}:554/stream1", email, password, CAM_IP);
+    println!("Opening RTSP stream: rtsp://{}:****@{}:554/stream1", email, CAM_IP);
+
+    let mut cap = videoio::VideoCapture::from_file(&rtsp_url, videoio::CAP_FFMPEG)?;
+    if !cap.is_opened()? {
+        anyhow::bail!("Failed to open RTSP stream. Check credentials and network.");
+    }
+    cap.set(videoio::CAP_PROP_BUFFERSIZE, 1.0)?;
+
     let frame_width = cap.get(videoio::CAP_PROP_FRAME_WIDTH)? as i32;
     let frame_height = cap.get(videoio::CAP_PROP_FRAME_HEIGHT)? as i32;
-    let fps = cap.get(videoio::CAP_PROP_FPS)?;
-    println!("Stream info: {}x{} @ {:.1} FPS", frame_width, frame_height, fps);
+    let stream_fps = cap.get(videoio::CAP_PROP_FPS)?;
+    println!("Stream: {}x{} @ {:.1} FPS", frame_width, frame_height, stream_fps);
 
     highgui::named_window(WINDOW, highgui::WINDOW_AUTOSIZE)?;
 
-    let mut frame_count = 0u64;
-    let mut last_key_check = Instant::now();
-    let debounce_delay = Duration::from_millis(250);
     let mut frame = Mat::default();
+    let mut frame_count = 0u64;
+    let mut last_faces: Vec<Detection> = Vec::new();
+    let mut last_persons: Vec<Detection> = Vec::new();
 
-    println!("Starting face detection. Press Q or ESC to quit.");
-    println!("If PTZ is enabled: Arrow keys for pan/tilt, H for calibrate");
+    let mut ptz_debounce = Instant::now() - Duration::from_secs(1);
+    let ptz_debounce_ms = Duration::from_millis(200);
 
-    // Performance tracking
     let mut fps_counter = 0u32;
     let mut last_fps_time = Instant::now();
-    let mut processing_times = Vec::new();
+    let mut display_fps = 0.0f32;
+
+    println!("Running. Q or ESC to quit.");
+    println!("Detection: Green=Face, Cyan=Person");
 
     loop {
-        let frame_start = Instant::now();
-        
         if !cap.read(&mut frame)? || frame.size()?.width == 0 {
-            println!("End of stream or empty frame");
+            println!("Stream ended or empty frame");
             break;
         }
 
         frame_count += 1;
         fps_counter += 1;
-        
-        // Create display frame
-        let mut display_frame = frame.clone();
-        
-        // Run face detection every 3rd frame for better performance
-        let mut faces = Vec::new();
-        if frame_count % 3 == 0 {
-            match detector.detect_faces(&frame) {
-                Ok(detected_faces) => {
-                    faces = detected_faces;
-                }
-                Err(e) => {
-                    eprintln!("Face detection error: {}", e);
-                }
-            }
-        }
-        
-        // Draw face detections
-        for (i, face) in faces.iter().enumerate() {
-            // Draw face rectangle (green)
-            imgproc::rectangle(
-                &mut display_frame, 
-                *face, 
-                core::Scalar::new(0.0, 255.0, 0.0, 0.0), // Green
-                2, 
-                imgproc::LINE_8, 
-                0
-            )?;
-            
-            // Draw face label
-            let label = format!("Face {}", i + 1);
-            imgproc::put_text(
-                &mut display_frame,
-                &label,
-                core::Point::new(face.x, face.y - 5),
-                imgproc::FONT_HERSHEY_SIMPLEX,
-                0.5,
-                core::Scalar::new(0.0, 255.0, 0.0, 0.0), // Green
-                1,
-                imgproc::LINE_AA,
-                false,
-            )?;
-            
-            // Try to detect eyes within the face region
-            if face.width > 50 && face.height > 50 { // Only for larger faces
-                // Create a sub-image for the face region
-                let face_region = Mat::roi(&frame, *face)?;
-                // Convert to a Mat we can use
-                let mut face_mat = Mat::default();
-                face_region.copy_to(&mut face_mat)?;
-                
-                match detector.detect_eyes(&face_mat) {
-                    Ok(eyes) => {
-                        for eye in eyes {
-                            // Adjust eye coordinates relative to the whole frame
-                            let eye_rect = core::Rect::new(
-                                face.x + eye.x,
-                                face.y + eye.y,
-                                eye.width,
-                                eye.height,
-                            );
-                            
-                            // Draw eye rectangle (blue)
-                            imgproc::rectangle(
-                                &mut display_frame,
-                                eye_rect,
-                                core::Scalar::new(255.0, 0.0, 0.0, 0.0), // Blue
-                                1,
-                                imgproc::LINE_8,
-                                0,
-                            )?;
-                        }
-                    }
-                    Err(_) => {
-                        // Eye detection failed, skip
-                    }
-                }
-            }
-            
-            // Draw face center point (red)
-            let face_center = core::Point::new(
-                face.x + face.width / 2,
-                face.y + face.height / 2,
-            );
-            imgproc::circle(
-                &mut display_frame,
-                face_center,
-                3,
-                core::Scalar::new(0.0, 0.0, 255.0, 0.0), // Red
-                2,
-                imgproc::LINE_AA,
-                0,
-            )?;
-        }
 
-        // Calculate FPS
         let now = Instant::now();
-        if now.duration_since(last_fps_time) > Duration::from_secs(1) {
-            let fps = fps_counter as f32 / now.duration_since(last_fps_time).as_secs_f32();
+        let elapsed = now.duration_since(last_fps_time).as_secs_f32();
+        if elapsed >= 1.0 {
+            display_fps = fps_counter as f32 / elapsed;
             fps_counter = 0;
             last_fps_time = now;
-            
-            // Track processing time
-            let process_time = frame_start.elapsed();
-            processing_times.push(process_time);
-            if processing_times.len() > 60 {
-                processing_times.remove(0);
-            }
-            
-            // Draw performance info
-            let avg_process_time: Duration = processing_times.iter().sum::<Duration>() / processing_times.len() as u32;
-            let stats = format!(
-                "FPS: {:.1} | Faces: {} | Process: {:.1}ms",
-                fps,
-                faces.len(),
-                avg_process_time.as_secs_f32() * 1000.0
-            );
-            
-            imgproc::put_text(
-                &mut display_frame,
-                &stats,
-                core::Point::new(10, 30),
-                imgproc::FONT_HERSHEY_SIMPLEX,
-                0.6,
-                core::Scalar::new(255.0, 255.0, 255.0, 0.0),
-                1,
-                imgproc::LINE_AA,
-                false,
-            )?;
         }
 
-        // Draw frame counter
-        let frame_info = format!("Frame: {}", frame_count);
-        imgproc::put_text(
-            &mut display_frame,
-            &frame_info,
-            core::Point::new(10, 60),
-            imgproc::FONT_HERSHEY_SIMPLEX,
+        // Face detection: runs every FACE_EVERY_N frames
+        if frame_count % FACE_EVERY_N == 0 {
+            match detector.detect_faces(&frame) {
+                Ok(faces) => last_faces = faces,
+                Err(e) => eprintln!("Face detection error: {}", e),
+            }
+        }
+
+        // Person detection: runs every PERSON_EVERY_N frames (heavier than face detection)
+        if frame_count % PERSON_EVERY_N == 0 {
+            match detector.detect_persons(&frame) {
+                Ok(persons) => last_persons = persons,
+                Err(e) => eprintln!("Person detection error: {}", e),
+            }
+        }
+
+        let mut display = frame.clone();
+
+        // Draw person boxes first (behind face boxes)
+        for det in &last_persons {
+            imgproc::rectangle(&mut display, det.rect, det.color, 2, imgproc::LINE_8, 0)?;
+            put_text_outlined(&mut display, det.label,
+                core::Point::new(det.rect.x, det.rect.y - 5),
+                0.5, det.color)?;
+        }
+
+        // Draw face boxes on top
+        for (i, det) in last_faces.iter().enumerate() {
+            imgproc::rectangle(&mut display, det.rect, det.color, 2, imgproc::LINE_8, 0)?;
+            put_text_outlined(&mut display,
+                &format!("{} {}", det.label, i + 1),
+                core::Point::new(det.rect.x, det.rect.y - 5),
+                0.5, det.color)?;
+        }
+
+        // HUD — always visible every frame
+        put_text_outlined(
+            &mut display,
+            &format!("FPS: {:.1}  Faces: {}  Persons: {}  Frame: {}",
+                display_fps, last_faces.len(), last_persons.len(), frame_count),
+            core::Point::new(10, 30),
             0.6,
             core::Scalar::new(255.0, 255.0, 255.0, 0.0),
-            1,
-            imgproc::LINE_AA,
-            false,
         )?;
-
-        // Draw instructions
-        let instructions = if camera.is_some() {
-            "Q/ESC: Quit | H: Calibrate | Arrow keys: Pan/Tilt"
-        } else {
-            "Q/ESC: Quit | PTZ: Disabled (auth failed)"
-        };
-        
-        imgproc::put_text(
-            &mut display_frame,
-            &instructions,
+        put_text_outlined(
+            &mut display,
+            if camera.is_some() { "Q/ESC: Quit | H: Home | Arrows: Pan/Tilt" }
+                               else { "Q/ESC: Quit | PTZ: Disabled" },
             core::Point::new(10, frame_height - 20),
-            imgproc::FONT_HERSHEY_SIMPLEX,
             0.5,
             core::Scalar::new(255.0, 255.0, 255.0, 0.0),
-            1,
-            imgproc::LINE_AA,
-            false,
         )?;
 
-        // Show frame
-        highgui::imshow(WINDOW, &display_frame)?;
+        highgui::imshow(WINDOW, &display)?;
 
-        // Handle keyboard input with debouncing
-        let now = Instant::now();
-        if now.duration_since(last_key_check) > debounce_delay {
-            let key = highgui::wait_key(1)?; // Very short wait for responsive UI
-            
-            match key {
-                113 | 27 => break, // 'q' or ESC
-                104 | 72 if camera.is_some() => { // 'h' or 'H'
-                    if let Some(cam) = &camera {
-                        let cam_lock = cam.lock().await;
-                        if let Err(e) = cam_lock.calibrate().await {
-                            println!("Failed to calibrate: {}", e);
-                        } else {
-                            println!("Calibrating camera...");
-                        }
-                    }
-                }
-                81 | 82 if camera.is_some() => { // Left/Right arrow keys (Linux keycodes)
-                    if let Some(cam) = &camera {
-                        let cam_lock = cam.lock().await;
-                        let _ = cam_lock.move_motor(-PAN_SPEED, 0).await;
-                        println!("Panning left...");
-                    }
-                }
-                83 | 84 if camera.is_some() => { // Up/Down arrow keys (Linux keycodes)
-                    if let Some(cam) = &camera {
-                        let cam_lock = cam.lock().await;
-                        let _ = cam_lock.move_motor(0, TILT_SPEED).await;
-                        println!("Tilting up...");
-                    }
-                }
-                _ => {}
-            }
-            
-            last_key_check = now;
+        // Must be called every frame for the GUI to process events
+        let key = highgui::wait_key(1)?;
+        match key {
+            113 | 27 => break, // q or ESC
+            _ => {}
         }
-        
-        // Check if we're running too slow
-        let frame_time = frame_start.elapsed();
-        if frame_time > Duration::from_millis(100) {
-            println!("Warning: Frame processing took {:.1}ms", frame_time.as_secs_f32() * 1000.0);
+
+        // PTZ commands with debounce
+        if Instant::now().duration_since(ptz_debounce) > ptz_debounce_ms {
+            if let Some(cam) = &camera {
+                let handled = match key {
+                    104 | 72 => {
+                        cam.lock().await.calibrate().await.ok();
+                        println!("Calibrating...");
+                        true
+                    }
+                    KEY_LEFT  => { cam.lock().await.move_motor(-PAN_SPEED, 0).await.ok(); true }
+                    KEY_RIGHT => { cam.lock().await.move_motor(PAN_SPEED, 0).await.ok(); true }
+                    KEY_UP    => { cam.lock().await.move_motor(0, TILT_SPEED).await.ok(); true }
+                    KEY_DOWN  => { cam.lock().await.move_motor(0, -TILT_SPEED).await.ok(); true }
+                    _ => false,
+                };
+                if handled {
+                    ptz_debounce = Instant::now();
+                }
+            }
         }
     }
 
     highgui::destroy_window(WINDOW)?;
-    println!("Application closed after {} frames.", frame_count);
+    println!("Closed after {} frames.", frame_count);
     Ok(())
 }
